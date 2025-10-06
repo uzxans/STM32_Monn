@@ -334,6 +334,8 @@ typedef struct {
 FW_Update_Context fw_ctx;
 static bool fw_request_active = false;   // текущий POST = fw_update?
 static bool login_request_active = false; // текущий POST = login?
+static char login_buf[128];
+static uint16_t login_buf_len = 0;
 // --- Helpers for Flash OTA ---
 static uint32_t Flash_GetSector(uint32_t Address)
 {
@@ -477,22 +479,11 @@ err_t httpd_post_begin(void *connection,
     // Обработка логина: проверяем креды при POST /login.cgi
     if(strcmp(uri, "/login.cgi") == 0) {
         login_request_active = true;
+        login_buf_len = 0;
         if (post_data && post_data_len > 0) {
-            char user[32]={0}, pass[32]={0};
-            char *u = strstr(post_data, "user=");
-            char *p = strstr(post_data, "pass=");
-            if (u) {
-                u += 5;
-                size_t n = 0; while (u[n] && u[n] != '&' && n < sizeof(user)-1) { user[n]=u[n]; n++; }
-                user[n]=0;
-            }
-            if (p) {
-                p += 5;
-                size_t n = 0; while (p[n] && p[n] != '&' && n < sizeof(pass)-1) { pass[n]=p[n]; n++; }
-                pass[n]=0;
-            }
-            extern volatile uint8_t g_is_authenticated;
-            g_is_authenticated = (user[0] && pass[0] && Creds_CheckLogin(user, pass)) ? 1 : 0;
+            uint16_t copy = (post_data_len > sizeof(login_buf)) ? sizeof(login_buf) : post_data_len;
+            memcpy(login_buf, post_data, copy);
+            login_buf_len = copy;
         }
         *connection_status = 1;
         return ERR_OK;
@@ -518,17 +509,31 @@ err_t httpd_post_begin(void *connection,
 
 err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 {
-    if(!fw_ctx.active || p == NULL) return ERR_OK;
+    if (p == NULL) return ERR_OK;
 
-    struct pbuf *q = p;
-    while(q) {
-        if (FW_FlashWriteStream((const uint8_t*)q->payload, q->len) != HAL_OK) {
-            fw_ctx.error = true;
-            fw_ctx.active = false;
-            break;
+    if (login_request_active) {
+        struct pbuf *q = p;
+        while (q && login_buf_len < sizeof(login_buf)) {
+            uint16_t room = sizeof(login_buf) - login_buf_len;
+            uint16_t to_copy = (q->len > room) ? room : q->len;
+            memcpy(login_buf + login_buf_len, q->payload, to_copy);
+            login_buf_len += to_copy;
+            q = q->next;
         }
-        fw_ctx.total_len += q->len;
-        q = q->next;
+        return ERR_OK;
+    }
+
+    if (fw_ctx.active) {
+        struct pbuf *q = p;
+        while(q) {
+            if (FW_FlashWriteStream((const uint8_t*)q->payload, q->len) != HAL_OK) {
+                fw_ctx.error = true;
+                fw_ctx.active = false;
+                break;
+            }
+            fw_ctx.total_len += q->len;
+            q = q->next;
+        }
     }
     return ERR_OK;
 }
@@ -538,13 +543,33 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
     // Если это был login — перенаправим по результату авторизации
     if (login_request_active) {
         if (response_uri && response_uri_len) {
+            // Разобрать накопленный буфер
+            char user[32]={0}, pass[32]={0};
+            if (login_buf_len > 0) {
+                const char *u = strstr(login_buf, "user=");
+                const char *p = strstr(login_buf, "pass=");
+                if (u) {
+                    u += 5;
+                    size_t n=0; while (u[n] && u[n] != '&' && n < sizeof(user)-1) { user[n]=u[n]; n++; }
+                    user[n]=0;
+                }
+                if (p) {
+                    p += 5;
+                    size_t n=0; while (p[n] && p[n] != '&' && n < sizeof(pass)-1) { pass[n]=p[n]; n++; }
+                    pass[n]=0;
+                }
+            }
             extern volatile uint8_t g_is_authenticated;
+            g_is_authenticated = (user[0] && pass[0] && Creds_CheckLogin(user, pass)) ? 1 : 0;
             if (g_is_authenticated) {
                 strncpy(response_uri, "/index.html", response_uri_len);
             } else {
                 strncpy(response_uri, "/login_failed.html", response_uri_len);
             }
         }
+        // сброс буфера и флага
+        login_buf_len = 0;
+        login_request_active = false;
         return;
     }
 
