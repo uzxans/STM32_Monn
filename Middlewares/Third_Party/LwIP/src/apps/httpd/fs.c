@@ -182,6 +182,7 @@ fs_bytes_left(struct fs_file *file)
 /* ---- Авторизация: если логин/пароль верный, перенаправляем на index.html ---- */
 #include "credentials.h"
 #include <string.h>
+static volatile int g_is_authenticated = 0;
 
 int fs_open_custom(struct fs_file *file, const char *name)
 {
@@ -216,6 +217,7 @@ int fs_open_custom(struct fs_file *file, const char *name)
     }
 
     if (user[0] && pass[0] && Creds_CheckLogin(user, pass)) {
+      g_is_authenticated = 1;
       /* Успех — редирект на index.html */
       file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /index.html\r\n\r\n";
       file->len = strlen(file->data);
@@ -223,7 +225,8 @@ int fs_open_custom(struct fs_file *file, const char *name)
       file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
       return 1;
     }
-    /* Неуспех — редирект на /login_failed.html */
+    /* Неуспех — сброс авторизации и редирект на /login_failed.html */
+    g_is_authenticated = 0;
     file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login_failed.html\r\n\r\n";
     file->len = strlen(file->data);
     file->index = file->len;
@@ -231,14 +234,28 @@ int fs_open_custom(struct fs_file *file, const char *name)
     return 1;
   }
 
-  /* Для остальных страниц — если нет ввода логина/пароля: редирект на login */
-  if (!strcmp(name, "/") || !strcmp(name, "/index.html") || !strcmp(name, "/settings.html") ||
-      !strcmp(name, "/event.html") || !strcmp(name, "/update.html") || strstr(name, ".shtml") != NULL) {
+  /* Logout */
+  if (!strncmp(name, "/logout.cgi", 11)) {
+    g_is_authenticated = 0;
     file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login.html\r\n\r\n";
     file->len = strlen(file->data);
     file->index = file->len;
     file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
     return 1;
+  }
+
+  /* Для остальных страниц — пропускаем, если авторизован; иначе редирект на login */
+  if (!strcmp(name, "/") || !strcmp(name, "/index.html") || !strcmp(name, "/settings.html") ||
+      !strcmp(name, "/event.html") || !strcmp(name, "/update.html") || strstr(name, ".shtml") != NULL) {
+    if (g_is_authenticated) {
+      return 0; /* отдать страницу обычно */
+    } else {
+      file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login.html\r\n\r\n";
+      file->len = strlen(file->data);
+      file->index = file->len;
+      file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+      return 1;
+    }
   }
   return 0;
 }
