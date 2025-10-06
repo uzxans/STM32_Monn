@@ -87,10 +87,10 @@ void MX_LWIP_Init(void)
   /* Registers the default network interface */
   netif_set_default(&gnetif);
 
-  /* We must always bring the network interface up connection or not... */
+  /* Поднимаем интерфейс сразу, сервер стартует без ожидания линка */
   netif_set_up(&gnetif);
 
-  /* Set the link callback function, this function is called on change of link status*/
+  /* Регистрируем колбэк линка */
   netif_set_link_callback(&gnetif, ethernetif_update_config);
 
 /* USER CODE BEGIN 3 */

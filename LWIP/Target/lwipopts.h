@@ -145,6 +145,11 @@
 #define LWIP_STATS_DISPLAY 0
 #define LWIP_DEBUG 0
 
+/* Включаем перехват файлов для авторизации */
+#ifndef LWIP_HTTPD_CUSTOM_FILES
+#define LWIP_HTTPD_CUSTOM_FILES 1
+#endif
+
 /* USER CODE END 1 */
 
 #ifdef __cplusplus

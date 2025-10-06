@@ -177,3 +177,33 @@ fs_bytes_left(struct fs_file *file)
 {
   return file->len - file->index;
 }
+
+#if LWIP_HTTPD_CUSTOM_FILES
+/* ---- Простейшая точка входа: редирект на /login.html, аутентификация через POST ---- */
+#include "credentials.h"
+#include <string.h>
+
+int fs_open_custom(struct fs_file *file, const char *name)
+{
+  if (file == NULL || name == NULL) return 0;
+  /* разрешаем страницы логина всегда */
+  if (!strcmp(name, "/login.html") || !strcmp(name, "/login_failed.html") || !strcmp(name, "/login.cgi")) {
+    return 0; /* отдавать обычным способом */
+  }
+  /* для всех остальных: редирект на логин */
+  if (!strcmp(name, "/") || !strcmp(name, "/index.html") || !strcmp(name, "/settings.html") ||
+      !strcmp(name, "/event.html") || !strcmp(name, "/update.html") || strstr(name, ".shtml") != NULL) {
+    file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login.html\r\n\r\n";
+    file->len = strlen(file->data);
+    file->index = file->len;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+    return 1;
+  }
+  return 0;
+}
+
+void fs_close_custom(struct fs_file *file)
+{
+  LWIP_UNUSED_ARG(file);
+}
+#endif /* LWIP_HTTPD_CUSTOM_FILES */

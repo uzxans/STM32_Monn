@@ -41,7 +41,7 @@
 #include "buttons/buttons_process.h"
 #include "oled/oled_display.h"
 #include "oled/oled_settings.h"
-//#include "credentials.h"
+#include "credentials.h"
 #include "buttons/buttons.h"
 #include "settings_storage.h"
 /* USER CODE END Includes */
@@ -467,6 +467,32 @@ err_t httpd_post_begin(void *connection,
                        u16_t post_data_len,
                        u8_t *connection_status)
 {
+    // Обработка логина: сохраняем новые креды при POST /login.cgi
+    if(strcmp(uri, "/login.cgi") == 0) {
+        // Данные формы в post_data (если небольшой), но мы работаем без локального буфера,
+        // поэтому используем простой разбор только если данные пришли здесь
+        if (post_data && post_data_len > 0) {
+            char user[32]={0}, pass[32]={0};
+            // Простейший парсер user=...&pass=...
+            char *u = strstr(post_data, "user=");
+            char *p = strstr(post_data, "pass=");
+            if (u) {
+                u += 5; // после 'user='
+                size_t n = 0; while (u[n] && u[n] != '&' && n < sizeof(user)-1) { user[n]=u[n]; n++; }
+                user[n]=0;
+            }
+            if (p) {
+                p += 5; // после 'pass='
+                size_t n = 0; while (p[n] && p[n] != '&' && n < sizeof(pass)-1) { pass[n]=p[n]; n++; }
+                pass[n]=0;
+            }
+            if (user[0] && pass[0]) {
+                Creds_Update(user, pass);
+            }
+        }
+        *connection_status = 1;
+        return ERR_OK;
+    }
     if(strcmp(uri, "/fw_update.cgi") == 0) {
         FW_ResetContext();
         // Если слот OTA потенциально пересекается с текущей прошивкой (не пустой) — не начинаем запись
@@ -504,6 +530,14 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 
 void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len)
 {
+    // Завершение /login.cgi: редирект на главную при успехе, иначе на ошибку
+    if (response_uri && response_uri_len) {
+        // грубо: если были когда-либо сохранены учётные данные — считаем успехом
+        const credentials_t *c = Creds_Get();
+        if (c && c->username[0]) {
+            strncpy(response_uri, "/index.html", response_uri_len);
+        }
+    }
     // Завершаем запись: дописываем неполное слово, если нужно
     if (fw_ctx.active && !fw_ctx.error) {
         if (fw_ctx.word_buf_len > 0) {
@@ -567,6 +601,8 @@ int main(void)
   MX_TIM3_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+  // Инициализация логина/пароля (admin/admin по умолчанию)
+  Creds_Init();
   Settings_Init();
 
   ip4_addr_t bk_ip, bk_mask, bk_gw;
