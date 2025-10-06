@@ -135,6 +135,7 @@ void ApplySNMPSettings(void) {
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+volatile uint8_t g_is_authenticated = 0; // глобальный флаг авторизации (упрощённая сессия)
 
 
 ip4_addr_t new_ip, new_mask, new_gw;
@@ -467,28 +468,24 @@ err_t httpd_post_begin(void *connection,
                        u16_t post_data_len,
                        u8_t *connection_status)
 {
-    // Обработка логина: сохраняем новые креды при POST /login.cgi
+    // Обработка логина: проверяем креды при POST /login.cgi
     if(strcmp(uri, "/login.cgi") == 0) {
-        // Данные формы в post_data (если небольшой), но мы работаем без локального буфера,
-        // поэтому используем простой разбор только если данные пришли здесь
         if (post_data && post_data_len > 0) {
             char user[32]={0}, pass[32]={0};
-            // Простейший парсер user=...&pass=...
             char *u = strstr(post_data, "user=");
             char *p = strstr(post_data, "pass=");
             if (u) {
-                u += 5; // после 'user='
+                u += 5;
                 size_t n = 0; while (u[n] && u[n] != '&' && n < sizeof(user)-1) { user[n]=u[n]; n++; }
                 user[n]=0;
             }
             if (p) {
-                p += 5; // после 'pass='
+                p += 5;
                 size_t n = 0; while (p[n] && p[n] != '&' && n < sizeof(pass)-1) { pass[n]=p[n]; n++; }
                 pass[n]=0;
             }
-            if (user[0] && pass[0]) {
-                Creds_Update(user, pass);
-            }
+            extern volatile uint8_t g_is_authenticated;
+            g_is_authenticated = (user[0] && pass[0] && Creds_CheckLogin(user, pass)) ? 1 : 0;
         }
         *connection_status = 1;
         return ERR_OK;

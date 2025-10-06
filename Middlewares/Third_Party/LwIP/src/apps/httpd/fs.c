@@ -182,7 +182,7 @@ fs_bytes_left(struct fs_file *file)
 /* ---- Авторизация: если логин/пароль верный, перенаправляем на index.html ---- */
 #include "credentials.h"
 #include <string.h>
-static volatile int g_is_authenticated = 0;
+extern volatile uint8_t g_is_authenticated; // флаг из main.c
 
 int fs_open_custom(struct fs_file *file, const char *name)
 {
@@ -193,45 +193,9 @@ int fs_open_custom(struct fs_file *file, const char *name)
     return 0; /* обычная отдача */
   }
 
-  /* Обработка результата логина: запрос к /login.cgi?user=...&pass=... */
+  /* /login.cgi обрабатывается через CGI handler в main.c */
   if (!strncmp(name, "/login.cgi", 10)) {
-    const char *q = strchr(name, '?');
-    const char *user_param = NULL;
-    const char *pass_param = NULL;
-    char user[32] = {0};
-    char pass[32] = {0};
-    if (q) {
-      /* очень простой парсер user=...&pass=... без URL-decode */
-      user_param = strstr(q+1, "user=");
-      pass_param = strstr(q+1, "pass=");
-      if (user_param) {
-        user_param += 5;
-        size_t n=0; while (user_param[n] && user_param[n] != '&' && n<sizeof(user)-1) { user[n]=user_param[n]; n++; }
-        user[n]=0;
-      }
-      if (pass_param) {
-        pass_param += 5;
-        size_t n=0; while (pass_param[n] && pass_param[n] != '&' && n<sizeof(pass)-1) { pass[n]=pass_param[n]; n++; }
-        pass[n]=0;
-      }
-    }
-
-    if (user[0] && pass[0] && Creds_CheckLogin(user, pass)) {
-      g_is_authenticated = 1;
-      /* Успех — редирект на index.html */
-      file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /index.html\r\n\r\n";
-      file->len = strlen(file->data);
-      file->index = file->len;
-      file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
-      return 1;
-    }
-    /* Неуспех — сброс авторизации и редирект на /login_failed.html */
-    g_is_authenticated = 0;
-    file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login_failed.html\r\n\r\n";
-    file->len = strlen(file->data);
-    file->index = file->len;
-    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
-    return 1;
+    return 0;
   }
 
   /* Logout */
