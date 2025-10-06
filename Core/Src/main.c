@@ -476,6 +476,10 @@ int main(void)
   if (bk_snmp_read[0])  strncpy(snmp_read,  bk_snmp_read,  sizeof(snmp_read)-1);
   if (bk_snmp_write[0]) strncpy(snmp_write, bk_snmp_write, sizeof(snmp_write)-1);
   if (bk_snmp_trap[0])  strncpy(snmp_trap,  bk_snmp_trap,  sizeof(snmp_trap)-1);
+  /* Применяем к SNMP-агенту на старте */
+  snmp_community[0] = snmp_read;
+  snmp_community_write[0] = snmp_write;
+  snmp_set_community_trap(snmp_trap);
 
 
   httpd_init();
