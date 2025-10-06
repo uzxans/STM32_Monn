@@ -151,6 +151,8 @@ tCGI CGI_TAB[5];
 
 const char* NET_CGI_Handler(int iIndex, int iNumParams, char *pcParam[], char *pcValue[])
 {
+    // Reset DHCP flag; it's set only when parameter is present
+    new_dhcp_enabled = 0;
     for (int i=0; i<iNumParams; i++) {
         // Сетевые
         if (strcmp(pcParam[i], "ip") == 0 && pcValue[i][0] != '\0') new_ip.addr = ipaddr_addr(pcValue[i]);
@@ -459,7 +461,8 @@ int main(void)
                             bk_snmp_write, sizeof(bk_snmp_write),
                             bk_snmp_trap, sizeof(bk_snmp_trap));
 
-  if (bk_ip.addr != 0) {
+  // Apply saved network settings on boot if present
+  if (bk_dhcp || bk_ip.addr != 0) {
       netif_set_down(&gnetif);
       if (bk_dhcp) {
           dhcp_start(&gnetif);
@@ -486,7 +489,7 @@ int main(void)
   CGI_TAB[2] = TIME_CGI;
   CGI_TAB[3] = SNMP_CGI;
   CGI_TAB[4] = FW_UPDATE_CGI;
-  http_set_cgi_handlers(CGI_TAB, 6); // количество зарегистрированных CGI
+  http_set_cgi_handlers(CGI_TAB, 5); // количество зарегистрированных CGI
   snmp_init();
 
   snmp_set_mibs(mib_array, snmp_num_mibs);
@@ -571,7 +574,7 @@ int main(void)
 	        sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
 	        sTime.StoreOperation = RTC_STOREOPERATION_RESET;
 
-	        if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) == HAL_OK)
+        if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) == HAL_OK)
 	        {
 	            RTC_DateTypeDef d;
 	            HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
@@ -582,12 +585,17 @@ int main(void)
 	        // Проверка применения SNMP
 	    	if (apply_snmp_settings) {
 	    	    apply_snmp_settings = 0;
-	    	    snmp_community[0] = snmp_read;
-	    	    snmp_community_write[0] = snmp_write;
-	    	    snmp_set_community_trap(snmp_trap);
+            snmp_community[0] = snmp_read;
+            snmp_community_write[0] = snmp_write;
+            snmp_set_community_trap(snmp_trap);
 
-	    	    Settings_Save_To_Backup(new_ip, new_mask, new_gw, new_dhcp_enabled,
-	    	                            snmp_read, snmp_write, snmp_trap);
+            // Preserve current network settings: reload them from backup and rewrite with new SNMP
+            ip4_addr_t saved_ip, saved_mask, saved_gw;
+            uint8_t saved_dhcp;
+            Settings_Load_From_Backup(&saved_ip, &saved_mask, &saved_gw, &saved_dhcp,
+                                      NULL, 0, NULL, 0, NULL, 0);
+            Settings_Save_To_Backup(saved_ip, saved_mask, saved_gw, saved_dhcp,
+                                    snmp_read, snmp_write, snmp_trap);
 	    	}
 
 
