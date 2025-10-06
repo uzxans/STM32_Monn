@@ -546,6 +546,8 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
             // Разобрать накопленный буфер
             char user[32]={0}, pass[32]={0};
             if (login_buf_len > 0) {
+                if (login_buf_len >= sizeof(login_buf)) login_buf_len = sizeof(login_buf)-1;
+                login_buf[login_buf_len] = '\0';
                 const char *u = strstr(login_buf, "user=");
                 const char *p = strstr(login_buf, "pass=");
                 if (u) {
