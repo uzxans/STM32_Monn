@@ -179,18 +179,59 @@ fs_bytes_left(struct fs_file *file)
 }
 
 #if LWIP_HTTPD_CUSTOM_FILES
-/* ---- Простейшая точка входа: редирект на /login.html, аутентификация через POST ---- */
+/* ---- Авторизация: если логин/пароль верный, перенаправляем на index.html ---- */
 #include "credentials.h"
 #include <string.h>
 
 int fs_open_custom(struct fs_file *file, const char *name)
 {
   if (file == NULL || name == NULL) return 0;
-  /* разрешаем страницы логина всегда */
-  if (!strcmp(name, "/login.html") || !strcmp(name, "/login_failed.html") || !strcmp(name, "/login.cgi")) {
-    return 0; /* отдавать обычным способом */
+
+  /* Разрешаем страницы логина и ошибки всегда */
+  if (!strcmp(name, "/login.html") || !strcmp(name, "/login_failed.html")) {
+    return 0; /* обычная отдача */
   }
-  /* для всех остальных: редирект на логин */
+
+  /* Обработка результата логина: запрос к /login.cgi?user=...&pass=... */
+  if (!strncmp(name, "/login.cgi", 10)) {
+    const char *q = strchr(name, '?');
+    const char *user_param = NULL;
+    const char *pass_param = NULL;
+    char user[32] = {0};
+    char pass[32] = {0};
+    if (q) {
+      /* очень простой парсер user=...&pass=... без URL-decode */
+      user_param = strstr(q+1, "user=");
+      pass_param = strstr(q+1, "pass=");
+      if (user_param) {
+        user_param += 5;
+        size_t n=0; while (user_param[n] && user_param[n] != '&' && n<sizeof(user)-1) { user[n]=user_param[n]; n++; }
+        user[n]=0;
+      }
+      if (pass_param) {
+        pass_param += 5;
+        size_t n=0; while (pass_param[n] && pass_param[n] != '&' && n<sizeof(pass)-1) { pass[n]=pass_param[n]; n++; }
+        pass[n]=0;
+      }
+    }
+
+    if (user[0] && pass[0] && Creds_CheckLogin(user, pass)) {
+      /* Успех — редирект на index.html */
+      file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /index.html\r\n\r\n";
+      file->len = strlen(file->data);
+      file->index = file->len;
+      file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+      return 1;
+    }
+    /* Неуспех — редирект на /login_failed.html */
+    file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login_failed.html\r\n\r\n";
+    file->len = strlen(file->data);
+    file->index = file->len;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+    return 1;
+  }
+
+  /* Для остальных страниц — если нет ввода логина/пароля: редирект на login */
   if (!strcmp(name, "/") || !strcmp(name, "/index.html") || !strcmp(name, "/settings.html") ||
       !strcmp(name, "/event.html") || !strcmp(name, "/update.html") || strstr(name, ".shtml") != NULL) {
     file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login.html\r\n\r\n";
