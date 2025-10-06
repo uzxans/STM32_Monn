@@ -472,22 +472,9 @@ err_t httpd_post_begin(void *connection,
                        u16_t post_data_len,
                        u8_t *connection_status)
 {
-    // Сброс признаков по умолчанию
+    // Этот проект теперь использует GET /login.cgi в fs.c; POST-логика отключена
     fw_request_active = false;
     login_request_active = false;
-
-    // Обработка логина: проверяем креды при POST /login.cgi
-    if(strcmp(uri, "/login.cgi") == 0) {
-        login_request_active = true;
-        login_buf_len = 0;
-        if (post_data && post_data_len > 0) {
-            uint16_t copy = (post_data_len > sizeof(login_buf)) ? sizeof(login_buf) : post_data_len;
-            memcpy(login_buf, post_data, copy);
-            login_buf_len = copy;
-        }
-        *connection_status = 1;
-        return ERR_OK;
-    }
     if(strcmp(uri, "/fw_update.cgi") == 0) {
         fw_request_active = true;
         FW_ResetContext();
@@ -541,55 +528,7 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len)
 {
     // Если это был login — перенаправим по результату авторизации
-    if (login_request_active) {
-        if (response_uri && response_uri_len) {
-            // Разобрать накопленный буфер
-            char user[32]={0}, pass[32]={0};
-            if (login_buf_len > 0) {
-                if (login_buf_len >= sizeof(login_buf)) login_buf_len = sizeof(login_buf)-1;
-                login_buf[login_buf_len] = '\0';
-                const char *u = strstr(login_buf, "user=");
-                const char *p = strstr(login_buf, "pass=");
-                if (u) {
-                    u += 5;
-                    size_t n=0; while (u[n] && u[n] != '&' && n < sizeof(user)-1) { user[n]=u[n]; n++; }
-                    user[n]=0;
-                }
-                if (p) {
-                    p += 5;
-                    size_t n=0; while (p[n] && p[n] != '&' && n < sizeof(pass)-1) { pass[n]=p[n]; n++; }
-                    pass[n]=0;
-                }
-            }
-            extern volatile uint8_t g_is_authenticated;
-            if ((strcmp(user, "admin") == 0 && strcmp(pass, "admin") == 0) ||
-                (user[0] && pass[0] && Creds_CheckLogin(user, pass))) {
-                g_is_authenticated = 1;
-            } else {
-                g_is_authenticated = 0;
-            }
-            if (g_is_authenticated) {
-                /* Отдаём файл index.html (без слеша), httpd вернёт 200 с содержимым */
-                size_t n = sizeof("index.html") - 1;
-                if (response_uri_len > 0) {
-                    if (n >= response_uri_len) n = response_uri_len - 1;
-                    memcpy(response_uri, "index.html", n);
-                    response_uri[n] = '\0';
-                }
-            } else {
-                size_t n = sizeof("login_failed.html") - 1;
-                if (response_uri_len > 0) {
-                    if (n >= response_uri_len) n = response_uri_len - 1;
-                    memcpy(response_uri, "login_failed.html", n);
-                    response_uri[n] = '\0';
-                }
-            }
-        }
-        // сброс буфера и флага
-        login_buf_len = 0;
-        login_request_active = false;
-        return;
-    }
+    // POST login отключён
 
     // Если это был fw_update — завершим запись и отдадим соответствующую страницу
     if (fw_request_active) {
