@@ -332,6 +332,8 @@ typedef struct {
 } FW_Update_Context;
 
 FW_Update_Context fw_ctx;
+static bool fw_request_active = false;   // текущий POST = fw_update?
+static bool login_request_active = false; // текущий POST = login?
 // --- Helpers for Flash OTA ---
 static uint32_t Flash_GetSector(uint32_t Address)
 {
@@ -468,8 +470,13 @@ err_t httpd_post_begin(void *connection,
                        u16_t post_data_len,
                        u8_t *connection_status)
 {
+    // Сброс признаков по умолчанию
+    fw_request_active = false;
+    login_request_active = false;
+
     // Обработка логина: проверяем креды при POST /login.cgi
     if(strcmp(uri, "/login.cgi") == 0) {
+        login_request_active = true;
         if (post_data && post_data_len > 0) {
             char user[32]={0}, pass[32]={0};
             char *u = strstr(post_data, "user=");
@@ -491,6 +498,7 @@ err_t httpd_post_begin(void *connection,
         return ERR_OK;
     }
     if(strcmp(uri, "/fw_update.cgi") == 0) {
+        fw_request_active = true;
         FW_ResetContext();
         // Если слот OTA потенциально пересекается с текущей прошивкой (не пустой) — не начинаем запись
         if (!Flash_IsBlank(FLASH_UPDATE_ADDR, 1024U)) {
@@ -527,35 +535,44 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 
 void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len)
 {
-    // Завершение /login.cgi: редирект на главную при успехе, иначе на ошибку
-    if (response_uri && response_uri_len) {
-        // грубо: если были когда-либо сохранены учётные данные — считаем успехом
-        const credentials_t *c = Creds_Get();
-        if (c && c->username[0]) {
-            strncpy(response_uri, "/index.html", response_uri_len);
-        }
-    }
-    // Завершаем запись: дописываем неполное слово, если нужно
-    if (fw_ctx.active && !fw_ctx.error) {
-        if (fw_ctx.word_buf_len > 0) {
-            while (fw_ctx.word_buf_len < 4) fw_ctx.word_buf[fw_ctx.word_buf_len++] = 0xFF;
-            uint32_t word;
-            memcpy(&word, fw_ctx.word_buf, 4);
-            if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, fw_ctx.write_addr, word) != HAL_OK) {
-                fw_ctx.error = true;
+    // Если это был login — перенаправим по результату авторизации
+    if (login_request_active) {
+        if (response_uri && response_uri_len) {
+            extern volatile uint8_t g_is_authenticated;
+            if (g_is_authenticated) {
+                strncpy(response_uri, "/index.html", response_uri_len);
             } else {
-                fw_ctx.write_addr += 4;
+                strncpy(response_uri, "/login_failed.html", response_uri_len);
             }
         }
+        return;
     }
-    HAL_FLASH_Lock();
 
-    // Возвращаем результат
-    fw_ctx.active = false;
-    if (fw_ctx.error || fw_ctx.total_len == 0) {
-        strncpy(response_uri, "/update.html", response_uri_len);
-    } else {
-        strncpy(response_uri, "/update_complete.html", response_uri_len);
+    // Если это был fw_update — завершим запись и отдадим соответствующую страницу
+    if (fw_request_active) {
+        // Завершаем запись: дописываем неполное слово, если нужно
+        if (fw_ctx.active && !fw_ctx.error) {
+            if (fw_ctx.word_buf_len > 0) {
+                while (fw_ctx.word_buf_len < 4) fw_ctx.word_buf[fw_ctx.word_buf_len++] = 0xFF;
+                uint32_t word;
+                memcpy(&word, fw_ctx.word_buf, 4);
+                if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, fw_ctx.write_addr, word) != HAL_OK) {
+                    fw_ctx.error = true;
+                } else {
+                    fw_ctx.write_addr += 4;
+                }
+            }
+        }
+        HAL_FLASH_Lock();
+        fw_ctx.active = false;
+        if (response_uri && response_uri_len) {
+            if (fw_ctx.error || fw_ctx.total_len == 0) {
+                strncpy(response_uri, "/update.html", response_uri_len);
+            } else {
+                strncpy(response_uri, "/update_complete.html", response_uri_len);
+            }
+        }
+        return;
     }
 }
 
