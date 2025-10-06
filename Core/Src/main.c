@@ -562,9 +562,20 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
             extern volatile uint8_t g_is_authenticated;
             g_is_authenticated = (user[0] && pass[0] && Creds_CheckLogin(user, pass)) ? 1 : 0;
             if (g_is_authenticated) {
-                strncpy(response_uri, "/index.html", response_uri_len);
+                /* Отдаём файл index.html (без слеша), httpd вернёт 200 с содержимым */
+                size_t n = sizeof("index.html") - 1;
+                if (response_uri_len > 0) {
+                    if (n >= response_uri_len) n = response_uri_len - 1;
+                    memcpy(response_uri, "index.html", n);
+                    response_uri[n] = '\0';
+                }
             } else {
-                strncpy(response_uri, "/login_failed.html", response_uri_len);
+                size_t n = sizeof("login_failed.html") - 1;
+                if (response_uri_len > 0) {
+                    if (n >= response_uri_len) n = response_uri_len - 1;
+                    memcpy(response_uri, "login_failed.html", n);
+                    response_uri[n] = '\0';
+                }
             }
         }
         // сброс буфера и флага
