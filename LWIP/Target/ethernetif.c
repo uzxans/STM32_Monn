@@ -636,6 +636,10 @@ void ethernetif_update_config(struct netif *netif)
 
   if(netif_is_link_up(netif))
   {
+    /* Жёсткий перезапуск PHY при появлении линка для LAN8742 */
+    HAL_ETH_WritePHYRegister(&heth, PHY_BCR, PHY_RESET);
+    HAL_Delay(2);
+
     /* Restart the auto-negotiation */
     if(heth.Init.AutoNegotiation != ETH_AUTONEGOTIATION_DISABLE)
     {
