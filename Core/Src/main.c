@@ -41,7 +41,7 @@
 #include "buttons/buttons_process.h"
 #include "oled/oled_display.h"
 #include "oled/oled_settings.h"
-//#include "credentials.h"
+#include "credentials.h"
 #include "buttons/buttons.h"
 #include "settings_storage.h"
 /* USER CODE END Includes */
@@ -135,6 +135,7 @@ void ApplySNMPSettings(void) {
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+volatile uint8_t g_is_authenticated = 0; // глобальный флаг авторизации (упрощённая сессия)
 
 
 ip4_addr_t new_ip, new_mask, new_gw;
@@ -151,6 +152,8 @@ tCGI CGI_TAB[5];
 
 const char* NET_CGI_Handler(int iIndex, int iNumParams, char *pcParam[], char *pcValue[])
 {
+    // Reset DHCP flag; it's set only when parameter is present
+    new_dhcp_enabled = 0;
     for (int i=0; i<iNumParams; i++) {
         // Сетевые
         if (strcmp(pcParam[i], "ip") == 0 && pcValue[i][0] != '\0') new_ip.addr = ipaddr_addr(pcValue[i]);
@@ -277,6 +280,7 @@ const tCGI SNMP_CGI = {"/set_snmp.cgi", SNMP_CGI_Handler};
 
 #include "stm32f2xx_hal.h"
 #include <string.h>
+#include <stdbool.h>
 
 #define FLASH_SNMP_ADDR  0x080E0000  // выбери свободный сектор
 
@@ -306,18 +310,137 @@ void Save_SNMP_Settings_To_Flash(const char* read, const char* write, const char
 }
 
 
-#define FLASH_UPDATE_ADDR   0x08020000     // свободный сектор для прошивки
-#define FLASH_UPDATE_SIZE   0x18000        // размер сектора (~96 KB)
-#define RAM_BUFFER_SIZE     16*1024        // буфер в RAM для POST данных
+// Попытка OTA: область для приёма прошивки. ВНИМАНИЕ:
+// Для STM32F207VCTx (256KB) приложение в текущей сборке занимает сектор 5 (0x08020000..0x0803FFFF),
+// поэтому место для OTA, скорее всего, недоступно. Код ниже выполняет безопасные проверки
+// и откажется от обновления, если область занята (не пустая), чтобы не "убить" прошивку.
+#define FLASH_UPDATE_ADDR   0x08020000U    // предполагаемый слот OTA (Sector 5, 128KB)
+#define FLASH_UPDATE_END    0x08040000U
+#define RAM_BUFFER_SIZE     (8*1024)       // небольшой буфер для выравнивания
 
 typedef struct {
     uint8_t buffer[RAM_BUFFER_SIZE];
     uint32_t buffer_len;
     uint32_t total_len;
     bool active;
+    bool error;
+    uint32_t write_addr;
+    uint8_t word_buf[4];
+    uint8_t word_buf_len;
+    uint32_t crc;
+    bool erased;
 } FW_Update_Context;
 
 FW_Update_Context fw_ctx;
+static bool fw_request_active = false;   // текущий POST = fw_update?
+static bool login_request_active = false; // текущий POST = login?
+static char login_buf[128];
+static uint16_t login_buf_len = 0;
+// --- Helpers for Flash OTA ---
+static uint32_t Flash_GetSector(uint32_t Address)
+{
+    if (Address < 0x08004000U) return FLASH_SECTOR_0;
+    if (Address < 0x08008000U) return FLASH_SECTOR_1;
+    if (Address < 0x0800C000U) return FLASH_SECTOR_2;
+    if (Address < 0x08010000U) return FLASH_SECTOR_3;
+    if (Address < 0x08020000U) return FLASH_SECTOR_4;
+    return FLASH_SECTOR_5; // up to 0x0803FFFF for 256KB devices
+}
+
+static bool Flash_IsBlank(uint32_t addr, uint32_t bytes_to_check)
+{
+    for (uint32_t off = 0; off < bytes_to_check; off += 4) {
+        uint32_t v = *(volatile uint32_t *)(addr + off);
+        if (v != 0xFFFFFFFFU) return false;
+    }
+    return true;
+}
+
+static void FW_ResetContext(void)
+{
+    fw_ctx.active = false;
+    fw_ctx.error = false;
+    fw_ctx.buffer_len = 0;
+    fw_ctx.total_len = 0;
+    fw_ctx.write_addr = FLASH_UPDATE_ADDR;
+    fw_ctx.word_buf_len = 0;
+    fw_ctx.crc = 0xFFFFFFFFU;
+    fw_ctx.erased = false;
+}
+
+static inline void FW_CrcUpdate(const uint8_t *data, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++) {
+        fw_ctx.crc ^= data[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            fw_ctx.crc = (fw_ctx.crc >> 1) ^ (0xEDB88320U & (~(fw_ctx.crc & 1U) + 1U));
+        }
+    }
+}
+
+static HAL_StatusTypeDef FW_EnsureErasedForAddress(uint32_t address)
+{
+    if (fw_ctx.erased) return HAL_OK;
+    // Проверка: область должна быть пустой, иначе это часть прошивки — отменяем OTA
+    if (!Flash_IsBlank(FLASH_UPDATE_ADDR, 1024U)) { // проверим первые 1KB
+        fw_ctx.error = true;
+        return HAL_ERROR;
+    }
+
+    FLASH_EraseInitTypeDef erase;
+    uint32_t pageError = 0;
+    erase.TypeErase = FLASH_TYPEERASE_SECTORS;
+    erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+    erase.Sector = Flash_GetSector(address);
+    erase.NbSectors = 1; // стираем только сектор слота OTA
+    HAL_StatusTypeDef st = HAL_FLASHEx_Erase(&erase, &pageError);
+    if (st == HAL_OK) fw_ctx.erased = true;
+    else fw_ctx.error = true;
+    return st;
+}
+
+static HAL_StatusTypeDef FW_FlashWriteStream(const uint8_t *data, uint32_t len)
+{
+    // Обеспечиваем стирание перед первой записью
+    if (!fw_ctx.erased) {
+        HAL_StatusTypeDef est = FW_EnsureErasedForAddress(fw_ctx.write_addr);
+        if (est != HAL_OK) return est;
+    }
+
+    // Обновляем CRC по потоку
+    FW_CrcUpdate(data, len);
+
+    uint32_t idx = 0;
+    // Дополним незавершённое слово, если было
+    if (fw_ctx.word_buf_len > 0) {
+        while (fw_ctx.word_buf_len < 4 && idx < len) {
+            fw_ctx.word_buf[fw_ctx.word_buf_len++] = data[idx++];
+        }
+        if (fw_ctx.word_buf_len == 4) {
+            uint32_t word;
+            memcpy(&word, fw_ctx.word_buf, 4);
+            if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, fw_ctx.write_addr, word) != HAL_OK) return HAL_ERROR;
+            fw_ctx.write_addr += 4;
+            fw_ctx.word_buf_len = 0;
+        }
+    }
+
+    // Пишем целыми словами напрямую из входного буфера
+    while ((idx + 4) <= len) {
+        uint32_t word;
+        memcpy(&word, &data[idx], 4);
+        if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, fw_ctx.write_addr, word) != HAL_OK) return HAL_ERROR;
+        fw_ctx.write_addr += 4;
+        idx += 4;
+        if (fw_ctx.write_addr >= FLASH_UPDATE_END) { fw_ctx.error = true; return HAL_ERROR; }
+    }
+
+    // Остаток < 4 байт сохраняем в буфер до завершения
+    while (idx < len) {
+        fw_ctx.word_buf[fw_ctx.word_buf_len++] = data[idx++];
+    }
+    return HAL_OK;
+}
 
 // CRC32 функция (можно заменить на HAL/STM32 встроенную)
 uint32_t crc32(uint8_t *data, uint32_t len)
@@ -349,11 +472,35 @@ err_t httpd_post_begin(void *connection,
                        u16_t post_data_len,
                        u8_t *connection_status)
 {
+    // Сброс признаков по умолчанию
+    fw_request_active = false;
+    login_request_active = false;
+
+    // Обработка логина: проверяем креды при POST /login.cgi
+    if(strcmp(uri, "/login.cgi") == 0) {
+        login_request_active = true;
+        login_buf_len = 0;
+        if (post_data && post_data_len > 0) {
+            uint16_t copy = (post_data_len > sizeof(login_buf)) ? sizeof(login_buf) : post_data_len;
+            memcpy(login_buf, post_data, copy);
+            login_buf_len = copy;
+        }
+        *connection_status = 1;
+        return ERR_OK;
+    }
     if(strcmp(uri, "/fw_update.cgi") == 0) {
-        fw_ctx.buffer_len = 0;
-        fw_ctx.total_len = 0;
+        fw_request_active = true;
+        FW_ResetContext();
+        // Если слот OTA потенциально пересекается с текущей прошивкой (не пустой) — не начинаем запись
+        if (!Flash_IsBlank(FLASH_UPDATE_ADDR, 1024U)) {
+            fw_ctx.error = true;
+            fw_ctx.active = false;
+            *connection_status = 0; // не буферизуем лишние данные
+            return ERR_OK;
+        }
         fw_ctx.active = true;
         *connection_status = 1; // продолжаем принимать
+        HAL_FLASH_Unlock();
     }
     return ERR_OK;
 }
@@ -362,51 +509,109 @@ err_t httpd_post_begin(void *connection,
 
 err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 {
-    if(!fw_ctx.active || p == NULL) return ERR_OK;
+    if (p == NULL) return ERR_OK;
 
-    uint16_t copied = 0;
-    while(p && fw_ctx.buffer_len < RAM_BUFFER_SIZE) {
-        uint16_t len = p->len > (RAM_BUFFER_SIZE - fw_ctx.buffer_len) ? (RAM_BUFFER_SIZE - fw_ctx.buffer_len) : p->len;
-        memcpy(fw_ctx.buffer + fw_ctx.buffer_len, p->payload, len);
-        fw_ctx.buffer_len += len;
-        copied += len;
-        p = p->next;
+    if (login_request_active) {
+        struct pbuf *q = p;
+        while (q && login_buf_len < sizeof(login_buf)) {
+            uint16_t room = sizeof(login_buf) - login_buf_len;
+            uint16_t to_copy = (q->len > room) ? room : q->len;
+            memcpy(login_buf + login_buf_len, q->payload, to_copy);
+            login_buf_len += to_copy;
+            q = q->next;
+        }
+        return ERR_OK;
     }
-    fw_ctx.total_len += copied;
 
+    if (fw_ctx.active) {
+        struct pbuf *q = p;
+        while(q) {
+            if (FW_FlashWriteStream((const uint8_t*)q->payload, q->len) != HAL_OK) {
+                fw_ctx.error = true;
+                fw_ctx.active = false;
+                break;
+            }
+            fw_ctx.total_len += q->len;
+            q = q->next;
+        }
+    }
     return ERR_OK;
 }
 
 void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len)
 {
-    if(fw_ctx.active && fw_ctx.total_len > 0) {
-        // Проверка CRC перед записью
-        uint32_t calculated_crc = crc32(fw_ctx.buffer, fw_ctx.buffer_len);
-        // Можно сравнить с CRC из заголовка формы (если есть)
-        // Например: если(calculated_crc != expected_crc) -> ошибка
-
-        // Стираем flash
-        HAL_FLASH_Unlock();
-        FLASH_EraseInitTypeDef erase;
-        uint32_t pageError;
-        erase.TypeErase = FLASH_TYPEERASE_SECTORS;
-        erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
-        erase.Sector = FLASH_SECTOR_2; // зависит от MCU
-        erase.NbSectors = 1;
-        HAL_FLASHEx_Erase(&erase, &pageError);
-
-        // Запись flash блоками по 32 бита
-        for(uint32_t i = 0; i < fw_ctx.buffer_len; i += 4) {
-            uint32_t word = 0xFFFFFFFF;
-            uint32_t copy_bytes = (fw_ctx.buffer_len - i) >= 4 ? 4 : (fw_ctx.buffer_len - i);
-            memcpy(&word, fw_ctx.buffer + i, copy_bytes);
-            HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_UPDATE_ADDR + i, word);
+    // Если это был login — перенаправим по результату авторизации
+    if (login_request_active) {
+        if (response_uri && response_uri_len) {
+            // Разобрать накопленный буфер
+            char user[32]={0}, pass[32]={0};
+            if (login_buf_len > 0) {
+                if (login_buf_len >= sizeof(login_buf)) login_buf_len = sizeof(login_buf)-1;
+                login_buf[login_buf_len] = '\0';
+                const char *u = strstr(login_buf, "user=");
+                const char *p = strstr(login_buf, "pass=");
+                if (u) {
+                    u += 5;
+                    size_t n=0; while (u[n] && u[n] != '&' && n < sizeof(user)-1) { user[n]=u[n]; n++; }
+                    user[n]=0;
+                }
+                if (p) {
+                    p += 5;
+                    size_t n=0; while (p[n] && p[n] != '&' && n < sizeof(pass)-1) { pass[n]=p[n]; n++; }
+                    pass[n]=0;
+                }
+            }
+            extern volatile uint8_t g_is_authenticated;
+            g_is_authenticated = (user[0] && pass[0] && Creds_CheckLogin(user, pass)) ? 1 : 0;
+            if (g_is_authenticated) {
+                /* Отдаём файл index.html (без слеша), httpd вернёт 200 с содержимым */
+                size_t n = sizeof("index.html") - 1;
+                if (response_uri_len > 0) {
+                    if (n >= response_uri_len) n = response_uri_len - 1;
+                    memcpy(response_uri, "index.html", n);
+                    response_uri[n] = '\0';
+                }
+            } else {
+                size_t n = sizeof("login_failed.html") - 1;
+                if (response_uri_len > 0) {
+                    if (n >= response_uri_len) n = response_uri_len - 1;
+                    memcpy(response_uri, "login_failed.html", n);
+                    response_uri[n] = '\0';
+                }
+            }
         }
-        HAL_FLASH_Lock();
+        // сброс буфера и флага
+        login_buf_len = 0;
+        login_request_active = false;
+        return;
     }
 
-    fw_ctx.active = false;
-    strncpy(response_uri, "/update_complete.html", response_uri_len);
+    // Если это был fw_update — завершим запись и отдадим соответствующую страницу
+    if (fw_request_active) {
+        // Завершаем запись: дописываем неполное слово, если нужно
+        if (fw_ctx.active && !fw_ctx.error) {
+            if (fw_ctx.word_buf_len > 0) {
+                while (fw_ctx.word_buf_len < 4) fw_ctx.word_buf[fw_ctx.word_buf_len++] = 0xFF;
+                uint32_t word;
+                memcpy(&word, fw_ctx.word_buf, 4);
+                if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, fw_ctx.write_addr, word) != HAL_OK) {
+                    fw_ctx.error = true;
+                } else {
+                    fw_ctx.write_addr += 4;
+                }
+            }
+        }
+        HAL_FLASH_Lock();
+        fw_ctx.active = false;
+        if (response_uri && response_uri_len) {
+            if (fw_ctx.error || fw_ctx.total_len == 0) {
+                strncpy(response_uri, "/update.html", response_uri_len);
+            } else {
+                strncpy(response_uri, "/update_complete.html", response_uri_len);
+            }
+        }
+        return;
+    }
 }
 
 
@@ -448,6 +653,8 @@ int main(void)
   MX_TIM3_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+  // Инициализация логина/пароля (admin/admin по умолчанию)
+  Creds_Init();
   Settings_Init();
 
   ip4_addr_t bk_ip, bk_mask, bk_gw;
@@ -459,7 +666,8 @@ int main(void)
                             bk_snmp_write, sizeof(bk_snmp_write),
                             bk_snmp_trap, sizeof(bk_snmp_trap));
 
-  if (bk_ip.addr != 0) {
+  // Apply saved network settings on boot if present
+  if (bk_dhcp || bk_ip.addr != 0) {
       netif_set_down(&gnetif);
       if (bk_dhcp) {
           dhcp_start(&gnetif);
@@ -473,6 +681,10 @@ int main(void)
   if (bk_snmp_read[0])  strncpy(snmp_read,  bk_snmp_read,  sizeof(snmp_read)-1);
   if (bk_snmp_write[0]) strncpy(snmp_write, bk_snmp_write, sizeof(snmp_write)-1);
   if (bk_snmp_trap[0])  strncpy(snmp_trap,  bk_snmp_trap,  sizeof(snmp_trap)-1);
+  /* Применяем к SNMP-агенту на старте */
+  snmp_community[0] = snmp_read;
+  snmp_community_write[0] = snmp_write;
+  snmp_set_community_trap(snmp_trap);
 
 
   httpd_init();
@@ -486,7 +698,7 @@ int main(void)
   CGI_TAB[2] = TIME_CGI;
   CGI_TAB[3] = SNMP_CGI;
   CGI_TAB[4] = FW_UPDATE_CGI;
-  http_set_cgi_handlers(CGI_TAB, 6); // количество зарегистрированных CGI
+  http_set_cgi_handlers(CGI_TAB, 5); // количество зарегистрированных CGI
   snmp_init();
 
   snmp_set_mibs(mib_array, snmp_num_mibs);
@@ -571,7 +783,7 @@ int main(void)
 	        sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
 	        sTime.StoreOperation = RTC_STOREOPERATION_RESET;
 
-	        if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) == HAL_OK)
+        if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) == HAL_OK)
 	        {
 	            RTC_DateTypeDef d;
 	            HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
@@ -582,12 +794,17 @@ int main(void)
 	        // Проверка применения SNMP
 	    	if (apply_snmp_settings) {
 	    	    apply_snmp_settings = 0;
-	    	    snmp_community[0] = snmp_read;
-	    	    snmp_community_write[0] = snmp_write;
-	    	    snmp_set_community_trap(snmp_trap);
+            snmp_community[0] = snmp_read;
+            snmp_community_write[0] = snmp_write;
+            snmp_set_community_trap(snmp_trap);
 
-	    	    Settings_Save_To_Backup(new_ip, new_mask, new_gw, new_dhcp_enabled,
-	    	                            snmp_read, snmp_write, snmp_trap);
+            // Preserve current network settings: reload them from backup and rewrite with new SNMP
+            ip4_addr_t saved_ip, saved_mask, saved_gw;
+            uint8_t saved_dhcp;
+            Settings_Load_From_Backup(&saved_ip, &saved_mask, &saved_gw, &saved_dhcp,
+                                      NULL, 0, NULL, 0, NULL, 0);
+            Settings_Save_To_Backup(saved_ip, saved_mask, saved_gw, saved_dhcp,
+                                    snmp_read, snmp_write, snmp_trap);
 	    	}
 
 

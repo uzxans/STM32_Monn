@@ -4,12 +4,14 @@
 extern RTC_HandleTypeDef hrtc;
 
 /* Backup-регистры STM32F2: RTC_BKP_DR0..RTC_BKP_DR19 (20 шт.) */
-#define BKP_IP_REG0          RTC_BKP_DR0
-#define BKP_MASK_REG1        RTC_BKP_DR1
-#define BKP_GW_REG2          RTC_BKP_DR2
-#define BKP_DHCP_REG3        RTC_BKP_DR3
-#define BKP_SNMP_BASE        RTC_BKP_DR4
-#define BKP_SNMP_REG_COUNT   8   // 8 регистров на строку (~32 байта)
+/* ВНИМАНИЕ: RTC_BKP_DR0 используется инициализацией RTC в MX_RTC_Init для флага, 
+ * поэтому для сетевых параметров начинаем с DR1. Для SNMP сокращаем до 4 регистров на строку. */
+#define BKP_IP_REG0          RTC_BKP_DR1
+#define BKP_MASK_REG1        RTC_BKP_DR2
+#define BKP_GW_REG2          RTC_BKP_DR3
+#define BKP_DHCP_REG3        RTC_BKP_DR4
+#define BKP_SNMP_BASE        RTC_BKP_DR5
+#define BKP_SNMP_REG_COUNT   4   // 4 регистра на строку (~16 байт)
 #define BKP_MAGIC_REG        RTC_BKP_DR19
 #define BKP_MAGIC_VALUE      0xBEEFCAFE
 

@@ -177,3 +177,55 @@ fs_bytes_left(struct fs_file *file)
 {
   return file->len - file->index;
 }
+
+#if LWIP_HTTPD_CUSTOM_FILES
+/* ---- Авторизация: если логин/пароль верный, перенаправляем на index.html ---- */
+#include "credentials.h"
+#include <string.h>
+extern volatile uint8_t g_is_authenticated; // флаг из main.c
+
+int fs_open_custom(struct fs_file *file, const char *name)
+{
+  if (file == NULL || name == NULL) return 0;
+
+  /* Разрешаем страницы логина и ошибки всегда */
+  if (!strcmp(name, "/login.html") || !strcmp(name, "/login_failed.html")) {
+    return 0; /* обычная отдача */
+  }
+
+  /* /login.cgi обрабатывается через CGI handler в main.c */
+  if (!strncmp(name, "/login.cgi", 10)) {
+    return 0;
+  }
+
+  /* Logout */
+  if (!strncmp(name, "/logout.cgi", 11)) {
+    g_is_authenticated = 0;
+    file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login.html\r\n\r\n";
+    file->len = strlen(file->data);
+    file->index = file->len;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+    return 1;
+  }
+
+  /* Для остальных страниц — пропускаем, если авторизован; иначе редирект на login */
+  if (!strcmp(name, "/") || !strcmp(name, "/index.html") || !strcmp(name, "/settings.html") ||
+      !strcmp(name, "/event.html") || !strcmp(name, "/update.html") || strstr(name, ".shtml") != NULL) {
+    if (g_is_authenticated) {
+      return 0; /* отдать страницу обычно */
+    } else {
+      file->data = (const char*)"HTTP/1.1 302 Found\r\nLocation: /login.html\r\n\r\n";
+      file->len = strlen(file->data);
+      file->index = file->len;
+      file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void fs_close_custom(struct fs_file *file)
+{
+  LWIP_UNUSED_ARG(file);
+}
+#endif /* LWIP_HTTPD_CUSTOM_FILES */

@@ -114,6 +114,42 @@
 #define HTTPD_MAX_REQUEST_URI_LEN 128
 #define HTTPD_MAX_POST_DATA_LEN   0  /* мы принимаем в потоках, поэтому 0 = нет локального ограничения */
 
+/* ====== Сокращение размера LwIP при сохранении HTTPD и SNMP ====== */
+/* Отключаем IPv6 полностью */
+#ifndef LWIP_IPV6
+#define LWIP_IPV6 0
+#endif
+#define LWIP_IPV6_DHCP6 0
+#define LWIP_IPV6_MLD   0
+#define LWIP_IPV6_REASS 0
+#define LWIP_IPV6_FRAG  0
+
+/* Отключаем неиспользуемые сервисы имени/мультикаст */
+#define LWIP_DNS 0
+#define LWIP_MDNS_RESPONDER 0
+#define LWIP_LLMNR_RESPONDER 0
+#define LWIP_NETBIOS 0
+#define LWIP_AUTOIP 0
+#define LWIP_IGMP 0
+
+/* Отключаем PPP/PPPoE (не нужен при Ethernet) */
+#define PPP_SUPPORT   0
+#define PPPOS_SUPPORT 0
+#define PPPOE_SUPPORT 0
+
+/* SNMP оставляем, используем RAW API (sockets/netconn уже отключены) */
+#define SNMP_USE_NETCONN 0
+
+/* Отключаем статистику и отладку для уменьшения размера */
+#define LWIP_STATS 0
+#define LWIP_STATS_DISPLAY 0
+#define LWIP_DEBUG 0
+
+/* Включаем перехват файлов для авторизации */
+#ifndef LWIP_HTTPD_CUSTOM_FILES
+#define LWIP_HTTPD_CUSTOM_FILES 1
+#endif
+
 /* USER CODE END 1 */
 
 #ifdef __cplusplus
